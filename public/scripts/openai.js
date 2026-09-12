@@ -4993,9 +4993,11 @@ function scheduleOpenAIPresetHydration() {
         names.unshift(activePreset);
     }
 
-    // The whole preset list has to be usable shortly after startup, so every preset is fetched right
-    // away instead of being spread over the session. The small stagger keeps each response parse in
-    // its own task; generation additionally waits for a preset that is still missing.
+    // Every preset is requested automatically instead of being spread over the session, but the load
+    // waits until the chat is on screen: the whole set is tens of megabytes and parsing it while the
+    // first messages render costs more than it saves (measured ~10 s on a 4x slowed CPU). The small
+    // stagger keeps each response parse in its own task, and generation still waits for a preset that
+    // is missing.
     const startHydration = () => {
         names.forEach((name, position) => {
             setTimeout(() => {
@@ -5004,13 +5006,25 @@ function scheduleOpenAIPresetHydration() {
                     return;
                 }
                 void ensureOpenAIPresetLoaded(name, { silent: true });
-            }, position * 150);
+            }, position * 250);
         });
     };
 
-    // Right after the app becomes interactive, so the presets are back in memory within seconds
-    // while the first render is already done.
-    eventSource.once(event_types.APP_READY, () => setTimeout(startHydration, 1000));
+    let hydrationStarted = false;
+    const startWhenChatIsRendered = () => {
+        if (hydrationStarted) {
+            return;
+        }
+        const chat = document.getElementById('chat');
+        if (chat && chat.children.length > 0) {
+            hydrationStarted = true;
+            setTimeout(startHydration, 500);
+            return;
+        }
+        setTimeout(startWhenChatIsRendered, 250);
+    };
+
+    setTimeout(startWhenChatIsRendered, 2000);
 }
 
 // Load OpenAI preset settings
