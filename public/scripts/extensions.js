@@ -288,21 +288,36 @@ export const extension_settings = {
 };
 
 function showHideExtensionsMenu() {
-    // Get the number of menu items that are not hidden
-    const hasMenuItems = $('#extensionsMenu').children().filter((_, child) => $(child).css('display') !== 'none').length > 0;
-
-    // We have menu items, so we can stop checking
-    if (hasMenuItems) {
-        clearInterval(menuInterval);
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu) {
+        return;
     }
+
+    // Get the number of menu items that are not hidden
+    const hasMenuItems = Array.from(menu.children).some(child => child instanceof HTMLElement && getComputedStyle(child).display !== 'none');
 
     // Show or hide the menu button
     $('#extensionsMenuButton').toggle(hasMenuItems);
 }
 
-// Periodically check for new extensions
-const menuInterval = setInterval(showHideExtensionsMenu, 1000);
+/**
+ * Watches the extensions menu instead of polling it every second.
+ *
+ * The previous implementation ran a jQuery query plus a computed-style read per menu item once per
+ * second, and only stopped once a visible item was found - with no visible item it kept polling
+ * forever, and every tick forced a style recalculation. Reacting to DOM changes costs nothing
+ * while the menu is idle and still updates the button as soon as an extension adds or hides items.
+ */
+function observeExtensionsMenu() {
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu) {
+        return;
+    }
 
+    const menuObserver = new MutationObserver(() => showHideExtensionsMenu());
+    menuObserver.observe(menu, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+    showHideExtensionsMenu();
+}
 /**
  * Gets the type of an extension based on its external ID.
  * @param {string} externalId External ID of the extension (excluding or including the leading 'third-party/')
@@ -753,6 +768,7 @@ async function addExtensionsButtonAndMenu() {
 
     $(document.body).append(extensionsMenuHTML);
     $('#leftSendForm').append(buttonHTML);
+    observeExtensionsMenu();
 
     const button = $('#extensionsMenuButton');
     const dropdown = $('#extensionsMenu');
