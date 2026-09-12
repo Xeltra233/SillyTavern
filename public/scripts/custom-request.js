@@ -314,6 +314,10 @@ export class TextCompletionService {
         if (presetName) {
             const presetManager = getPresetManager(this.TYPE);
             if (presetManager) {
+                // Preset contents may still be lazy loaded (perf.lazyOpenAIPresets).
+                if (presetManager.apiId === 'openai') {
+                    await ensureOpenAIPresetLoaded(presetName);
+                }
                 const preset = presetManager.getCompletionPresetByName(presetName);
                 if (preset) {
                     // Convert preset to payload and merge with custom data
@@ -549,6 +553,10 @@ export class ChatCompletionService {
         if (presetName) {
             const presetManager = getPresetManager(this.TYPE);
             if (presetManager) {
+                // Preset contents may still be lazy loaded (perf.lazyOpenAIPresets).
+                if (presetManager.apiId === 'openai') {
+                    await ensureOpenAIPresetLoaded(presetName);
+                }
                 const preset = presetManager.getCompletionPresetByName(presetName);
                 if (preset) {
                     // Convert preset to payload and merge with custom parameters

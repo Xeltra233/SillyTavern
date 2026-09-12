@@ -4926,7 +4926,7 @@ async function onLogitBiasPresetDeleteClick() {
  * @param {{ silent?: boolean }} [options] Options
  * @returns {Promise<object|null>} Preset contents, or null when unavailable
  */
-async function ensureOpenAIPresetLoaded(presetName, { silent = false } = {}) {
+export async function ensureOpenAIPresetLoaded(presetName, { silent = false } = {}) {
     if (!presetName) {
         return null;
     }
@@ -4983,6 +4983,14 @@ function scheduleOpenAIPresetHydration() {
     const names = Object.keys(openai_setting_names);
     if (names.length === 0) {
         return;
+    }
+
+    // Load the preset that generation will use first: other code reads preset contents by name and
+    // falls back to default parameters while a preset is still a placeholder.
+    const activePreset = oai_settings.preset_settings_openai;
+    if (activePreset && names.includes(activePreset)) {
+        names.splice(names.indexOf(activePreset), 1);
+        names.unshift(activePreset);
     }
 
     const hydrateNext = async (position) => {
