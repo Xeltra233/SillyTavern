@@ -4993,24 +4993,24 @@ function scheduleOpenAIPresetHydration() {
         names.unshift(activePreset);
     }
 
-    const hydrateNext = async (position) => {
-        if (position >= names.length) {
-            return;
-        }
-
-        const name = names[position];
-        const index = openai_setting_names[name];
-
-        if (!openai_settings[index]) {
-            await ensureOpenAIPresetLoaded(name, { silent: true });
-        }
-
-        // One preset per slot keeps each idle task bounded.
-        setTimeout(() => void hydrateNext(position + 1), 1500);
+    // The whole preset list has to be usable shortly after startup, so every preset is fetched right
+    // away instead of being spread over the session. The small stagger keeps each response parse in
+    // its own task; generation additionally waits for a preset that is still missing.
+    const startHydration = () => {
+        names.forEach((name, position) => {
+            setTimeout(() => {
+                const index = openai_setting_names[name];
+                if (openai_settings[index]) {
+                    return;
+                }
+                void ensureOpenAIPresetLoaded(name, { silent: true });
+            }, position * 150);
+        });
     };
 
-    // Start well after startup so background preset fetches never compete with the first render.
-    setTimeout(() => void hydrateNext(0), 10000);
+    // Right after the app becomes interactive, so the presets are back in memory within seconds
+    // while the first render is already done.
+    eventSource.once(event_types.APP_READY, () => setTimeout(startHydration, 1000));
 }
 
 // Load OpenAI preset settings
