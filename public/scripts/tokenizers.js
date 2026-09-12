@@ -185,13 +185,74 @@ async function loadTokenCache() {
                 ? Object.assign(entries, existing)
                 : entries;
         }
+
+        // A stored cache from an older build may be far larger than the current bounds.
+        pruneTokenCache();
     } catch (e) {
         console.log('Chat Completions: unable to load token cache, using default value', e);
     }
 }
 
+/**
+ * Upper bounds for the token cache.
+ *
+ * The whole cache is stored as a single IndexedDB record and deserialized on the main thread, so
+ * an unbounded cache turns into seconds of startup blocking (measured: ~1.3-1.5 s at 4x CPU
+ * throttle with ~3k entries, and tens of seconds once it grew further). Keeping only the most
+ * recently written chats and entries bounds that cost while still reusing counts for chats in use.
+ * @type {number}
+ */
+const MAX_TOKEN_CACHE_CHATS = 50;
+
+/** @type {number} */
+const MAX_TOKEN_CACHE_ENTRIES_PER_CHAT = 2000;
+
+/**
+ * Drops the oldest chats/entries so the cache cannot grow without bound.
+ * Objects keep string keys in insertion order, which approximates usage recency.
+ */
+function pruneTokenCache() {
+    const chatIds = Object.keys(tokenCache);
+
+    for (const chatId of chatIds.slice(0, Math.max(0, chatIds.length - MAX_TOKEN_CACHE_CHATS))) {
+        delete tokenCache[chatId];
+    }
+
+    for (const chatId of Object.keys(tokenCache)) {
+        const entries = tokenCache[chatId];
+        if (!entries || typeof entries !== 'object') {
+            delete tokenCache[chatId];
+            continue;
+        }
+        const keys = Object.keys(entries);
+        const excess = keys.length - MAX_TOKEN_CACHE_ENTRIES_PER_CHAT;
+        if (excess > 0) {
+            for (const key of keys.slice(0, excess)) {
+                delete entries[key];
+            }
+        }
+    }
+}
+/** @type {Promise<void>|null} */
+let tokenCacheLoadPromise = null;
+
+/**
+ * Loads the token cache exactly once and lets other code wait for it.
+ * Saving before the stored cache has been merged would overwrite it with the (nearly empty)
+ * in-memory map, so both saving and the startup schedule go through this.
+ * @returns {Promise<void>}
+ */
+function ensureTokenCacheLoaded() {
+    tokenCacheLoadPromise ??= loadTokenCache();
+    return tokenCacheLoadPromise;
+}
+
 export async function saveTokenCache() {
     try {
+        // Never write before the stored cache has been merged into memory.
+        await ensureTokenCacheLoaded();
+        // Bound the record that will be written back, so loading it stays cheap next time.
+        pruneTokenCache();
         console.debug('Chat Completions: saving token cache');
         await objectStore.setItem('tokenCache', tokenCache);
     } catch (e) {
@@ -1241,7 +1302,7 @@ export async function initTokenizers() {
     // startup sequence (LoAF: 1.4-1.9 s of main-thread time at 4x CPU throttle, worse on a cold
     // cache). Token counts are only needed once something actually counts tokens, so load it
     // right after the app becomes interactive.
-    eventSource.on(event_types.APP_READY, () => setTimeout(() => void loadTokenCache(), 0));
+    eventSource.on(event_types.APP_READY, () => setTimeout(() => void ensureTokenCacheLoaded(), 0));
     registerDebugFunction('resetTokenCache', 'Reset token cache', 'Purges the calculated token counts. Use this if you want to force a full re-tokenization of all chats or suspect the token counts are wrong.', resetTokenCache);
 }
 
