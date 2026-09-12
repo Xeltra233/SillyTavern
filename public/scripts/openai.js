@@ -4212,15 +4212,25 @@ function migrateChatCompletionSettings(settings) {
 }
 
 /**
+ * Whether OpenAI preset contents are loaded on demand (see perf.lazyOpenAIPresets).
+ * When true, /api/settings/get only sends the preset names and each preset's contents are
+ * fetched right before they are applied, exported or overwritten.
+ * @type {boolean}
+ */
+let lazyOpenAIPresets = false;
+
+/**
  * Load OpenAI settings from backend data
  * @param {any} data Settings data from backend
  * @param {ChatCompletionSettings} settings Saved settings from backend
  */
 function loadOpenAISettings(data, settings) {
+    lazyOpenAIPresets = data?.perf?.lazyOpenAIPresets === true;
     openai_setting_names = data.openai_setting_names;
     openai_settings = data.openai_settings;
     openai_settings.forEach(function (item, i) {
-        openai_settings[i] = JSON.parse(item);
+        // Placeholders stay undefined until ensureOpenAIPresetLoaded() fetches them.
+        openai_settings[i] = typeof item === 'string' ? JSON.parse(item) : undefined;
     });
 
     $('#settings_preset_openai').empty();
@@ -4301,6 +4311,9 @@ function loadOpenAISettings(data, settings) {
     $('#openrouter_quantizations_chat').trigger('change');
     $('#nanogpt_provider').trigger('change');
     $('#chat_completion_source').trigger('change');
+
+    // With lazy preset loading, warm the remaining preset contents in the background.
+    scheduleOpenAIPresetHydration();
 }
 
 function setNamesBehaviorControls() {
@@ -4505,10 +4518,15 @@ async function saveOpenAIPreset(name, settings, triggerUi = true) {
     if (savePresetSettings.ok) {
         const data = await savePresetSettings.json();
 
-        if (Object.keys(openai_setting_names).includes(data.name)) {
-            oai_settings.preset_settings_openai = data.name;
-            const value = openai_setting_names[data.name];
-            Object.assign(openai_settings[value], presetBody);
+    if (Object.keys(openai_setting_names).includes(data.name)) {
+        oai_settings.preset_settings_openai = data.name;
+        const value = openai_setting_names[data.name];
+        // Never merge into an unloaded placeholder.
+        await ensureOpenAIPresetLoaded(data.name);
+        if (!openai_settings[value]) {
+            openai_settings[value] = {};
+        }
+        Object.assign(openai_settings[value], presetBody);
             $(`#settings_preset_openai option[value="${value}"]`).prop('selected', true);
             if (triggerUi) $('#settings_preset_openai').trigger('change');
         } else {
@@ -4726,7 +4744,11 @@ async function onPresetImportFileChange(e) {
 
     if (Object.keys(openai_setting_names).includes(data.name)) {
         oai_settings.preset_settings_openai = data.name;
-        const value = openai_setting_names[data.name];
+        // Never merge into an unloaded placeholder.
+        await ensureOpenAIPresetLoaded(data.name);
+        if (!openai_settings[value]) {
+            openai_settings[value] = {};
+        }
         Object.assign(openai_settings[value], presetBody);
         $(`#settings_preset_openai option[value="${value}"]`).prop('selected', true);
         $('#settings_preset_openai').trigger('change');
@@ -4746,7 +4768,8 @@ async function onExportPresetClick() {
         toastr.error(t`No preset selected`);
         return;
     }
-
+    // Preset contents may still be lazy loaded (not fetched yet).
+    await ensureOpenAIPresetLoaded(oai_settings.preset_settings_openai);
     const preset = structuredClone(openai_settings[openai_setting_names[oai_settings.preset_settings_openai]]);
 
     const fieldValues = sensitiveFields.filter(field => preset[field]).map(field => `<b>${field}</b>: <code>${preset[field]}</code>`);
@@ -4894,14 +4917,111 @@ async function onLogitBiasPresetDeleteClick() {
     saveSettingsDebounced();
 }
 
+/**
+ * Ensures the contents of an OpenAI preset are available in memory.
+ *
+ * With perf.lazyOpenAIPresets the server sends preset names only, so the contents are fetched
+ * on first use (selecting, exporting or overwriting a preset). Without lazy loading this is a no-op.
+ * @param {string} presetName Preset name
+ * @param {{ silent?: boolean }} [options] Options
+ * @returns {Promise<object|null>} Preset contents, or null when unavailable
+ */
+async function ensureOpenAIPresetLoaded(presetName, { silent = false } = {}) {
+    if (!presetName) {
+        return null;
+    }
+
+    const index = openai_setting_names[presetName];
+    if (index === undefined) {
+        return null;
+    }
+
+    const existing = openai_settings[index];
+    if (existing && typeof existing === 'object') {
+        return existing;
+    }
+
+    if (!lazyOpenAIPresets) {
+        return existing ?? null;
+    }
+
+    try {
+        const response = await fetch('/api/presets/get', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ apiId: 'openai', name: presetName }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        openai_settings[index] = data.preset;
+        return data.preset;
+    } catch (error) {
+        console.error('Failed to load preset contents', presetName, error);
+        if (!silent) {
+            toastr.error(t`Failed to load the preset`, t`Preset not loaded`);
+        }
+        return null;
+    }
+}
+
+/**
+ * Fetches the remaining preset contents in the background, one preset per tick.
+ *
+ * Lazy loading keeps the startup payload small, but extensions may read presets synchronously by
+ * name (e.g. getCompletionPresetByName). Hydration restores the full in-memory list shortly after
+ * startup, without a single multi-megabyte main-thread task.
+ */
+function scheduleOpenAIPresetHydration() {
+    if (!lazyOpenAIPresets) {
+        return;
+    }
+
+    const names = Object.keys(openai_setting_names);
+    if (names.length === 0) {
+        return;
+    }
+
+    const hydrateNext = async (position) => {
+        if (position >= names.length) {
+            return;
+        }
+
+        const name = names[position];
+        const index = openai_setting_names[name];
+
+        if (!openai_settings[index]) {
+            await ensureOpenAIPresetLoaded(name, { silent: true });
+        }
+
+        // One preset per slot keeps each idle task bounded.
+        setTimeout(() => void hydrateNext(position + 1), 1500);
+    };
+
+    // Start well after startup so background preset fetches never compete with the first render.
+    setTimeout(() => void hydrateNext(0), 10000);
+}
+
 // Load OpenAI preset settings
-function onSettingsPresetChange() {
+async function onSettingsPresetChange() {
     const presetNameBefore = oai_settings.preset_settings_openai;
 
     const presetName = $('#settings_preset_openai').find(':selected').text();
     oai_settings.preset_settings_openai = presetName;
 
-    const preset = structuredClone(openai_settings[openai_setting_names[oai_settings.preset_settings_openai]]);
+    // Preset contents are lazy loaded; make sure they are in memory before applying.
+    await ensureOpenAIPresetLoaded(presetName);
+
+    const presetSource = openai_settings[openai_setting_names[oai_settings.preset_settings_openai]];
+    if (!presetSource) {
+        console.warn('OpenAI preset contents unavailable', presetName);
+        return;
+    }
+
+    const preset = structuredClone(presetSource);
 
     migrateChatCompletionSettings(preset);
 

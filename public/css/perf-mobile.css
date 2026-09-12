@@ -1,0 +1,63 @@
+/**
+ * Mobile rendering optimizations.
+ *
+ * Loaded only on narrow viewports (see the media attribute on the <link> in index.html), so
+ * desktop rendering is byte-for-byte unaffected.
+ *
+ * Why this exists: on phones the main cost is not JavaScript but painting/compositing. The
+ * default SillyTavern look stacks a blurred, fixed background behind translucent panels, and
+ * chat messages with long HTML are expensive to re-paint while scrolling. The rules below
+ * remove that per-frame cost on small screens while leaving the desktop layout intact.
+ *
+ * Everything here is opt-out: deleting the <link> in index.html restores stock behavior.
+ */
+
+@media (max-width: 900px) {
+
+    /* 1. Neutralize the backdrop blur. A blurred layer over a fixed background forces a
+       full-screen re-blur on every scroll frame, which is the single most expensive effect
+       for mobile GPUs. `!important` is required because themes set the variable themselves. */
+    :root {
+        --SmartThemeBlurStrength: 0px !important;
+    }
+
+    /* 2. A fixed background attachment is repainted on scroll and is especially slow on mobile
+       Safari. Scrolling it with the content is much cheaper. */
+    #bg1,
+    #bg_custom {
+        background-attachment: scroll !important;
+    }
+
+    /* 3. Isolate chat messages: layout/paint work inside one message can no longer invalidate
+       the whole chat, and off-screen messages skip layout+paint entirely. The intrinsic size
+       keeps the scrollbar stable before a message has been rendered. */
+    #chat .mes {
+        contain: layout style paint;
+        content-visibility: auto;
+        contain-intrinsic-size: auto 220px;
+    }
+
+    /* 4. Flatten expensive per-message decoration (shadows / extra blur / text glow).
+       Only the outer message chrome is affected - HTML rendered inside message iframes keeps
+       its own styling. */
+    #chat .mes,
+    #chat .mes *:not(iframe) {
+        box-shadow: none !important;
+        text-shadow: none !important;
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+    }
+
+    /* 5. Keep the message action buttons cheap to composite while scrolling. */
+    #chat .mes .mes_buttons,
+    #chat .mes .swipe_left,
+    #chat .mes .swipe_right {
+        will-change: auto;
+    }
+}
+
+/*
+ * Fallback: if `content-visibility` ever causes wrong scroll anchoring or broken text
+ * selection on some device, comment out rule 3 above. Keeping `contain: layout style paint`
+ * alone still provides most of the isolation benefit.
+ */

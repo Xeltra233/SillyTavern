@@ -46,6 +46,68 @@ const activeExtensions = new Set();
 const extensionLoadErrors = new Set();
 
 const getApiUrl = () => extension_settings.apiUrl;
+
+/**
+ * Performance-related switches provided by the server (/api/settings/get -> data.perf).
+ * Defaults mirror the config.yaml defaults so the frontend stays safe if the flags are missing.
+ * @type {{ deferredExtensionLoad: boolean }}
+ */
+const perfFlags = {
+    deferredExtensionLoad: false,
+};
+
+/**
+ * Applies performance-related switches received from the server.
+ * @param {{ deferredExtensionLoad?: boolean }} [flags] Flags received from the server
+ */
+export function setPerfFlags(flags) {
+    Object.assign(perfFlags, flags ?? {});
+}
+
+/** @type {Promise<void>|null} */
+let extensionsActivationPromise = null;
+
+/** @type {boolean} */
+let isFirstExtensionSettingsLoad = true;
+
+/**
+ * Resolves once every enabled extension has been activated.
+ * Code paths that depend on extension hooks (generation, group chats, slash commands)
+ * await this so that deferred activation cannot change behavior.
+ * @returns {Promise<void>}
+ */
+export function getExtensionsActivationPromise() {
+    return extensionsActivationPromise ?? Promise.resolve();
+}
+
+/**
+ * Activates all enabled extensions. Idempotent: repeated calls share one promise.
+ * @returns {Promise<void>}
+ */
+export function startExtensionsActivation() {
+    if (!extensionsActivationPromise) {
+        extensionsActivationPromise = activateExtensions()
+            .catch(error => console.error('Extension activation failed', error));
+    }
+    return extensionsActivationPromise;
+}
+
+/**
+ * Schedules extension activation for after the application is interactive.
+ * Extension bundles are several megabytes and used to block APP_READY on slow devices.
+ */
+function scheduleExtensionsActivation() {
+    const run = () => {
+        const start = () => void startExtensionsActivation();
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(start, { timeout: 3000 });
+        } else {
+            setTimeout(start, 0);
+        }
+    };
+    // APP_READY is an auto-fire event, so this also runs if it was already emitted.
+    eventSource.on(event_types.APP_READY, run);
+}
 const sortManifestsByOrder = (a, b) => parseInt(a.loading_order) - parseInt(b.loading_order) || String(a.display_name).localeCompare(String(b.display_name));
 const sortManifestsByName = (a, b) => String(a.display_name).localeCompare(String(b.display_name)) || parseInt(a.loading_order) - parseInt(b.loading_order);
 let connectedToApi = false;
@@ -700,11 +762,13 @@ async function addExtensionsButtonAndMenu() {
         placement: 'top-start',
     });
 
-    $(button).on('click', function () {
+    $(button).on('click', async function () {
         if (isDropdownVisible) {
             dropdown.fadeOut(animation_duration);
             isDropdownVisible = false;
         } else {
+            // Menu items and panel contents come from extensions; wait for deferred activation.
+            await getExtensionsActivationPromise();
             dropdown.fadeIn(animation_duration);
             isDropdownVisible = true;
         }
@@ -1797,11 +1861,27 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     extensionTypes = Object.fromEntries(extensions.map(x => [x.name, x.type]));
     manifests = await getManifests(extensionNames);
 
+    // Only the very first (startup) load may defer activation. Later loads - extension install,
+    // import, etc. - keep upstream behavior and activate eagerly.
+    const mayDeferActivation = perfFlags.deferredExtensionLoad && isFirstExtensionSettingsLoad;
+    isFirstExtensionSettingsLoad = false;
+
     if (versionChanged && enableAutoUpdate) {
-        await autoUpdateExtensions(false);
+        if (mayDeferActivation) {
+            // Extension auto-update performs server-side git work; keep it off the startup path.
+            eventSource.on(event_types.APP_READY, () => {
+                void autoUpdateExtensions(false).catch(error => console.error('Extension auto-update failed', error));
+            });
+        } else {
+            await autoUpdateExtensions(false);
+        }
     }
 
-    await activateExtensions();
+    if (mayDeferActivation) {
+        scheduleExtensionsActivation();
+    } else {
+        await activateExtensions();
+    }
     if (extension_settings.autoConnect && extension_settings.apiUrl) {
         connectToApi(extension_settings.apiUrl);
     }

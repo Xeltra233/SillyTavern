@@ -187,7 +187,7 @@ import {
 } from './scripts/utils.js';
 import { debounce_timeout, GENERATION_TYPE_TRIGGERS, IGNORE_SYMBOL, inject_ids, MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE, OVERSWIPE_BEHAVIOR, SCROLL_BEHAVIOR, SWIPE_DIRECTION, SWIPE_SOURCE, SWIPE_STATE } from './scripts/constants.js';
 
-import { cancelDebouncedMetadataSave, doDailyExtensionUpdatesCheck, extension_settings, initExtensions, loadExtensionSettings, runGenerationInterceptors } from './scripts/extensions.js';
+import { cancelDebouncedMetadataSave, doDailyExtensionUpdatesCheck, extension_settings, getExtensionsActivationPromise, initExtensions, loadExtensionSettings, runGenerationInterceptors, setPerfFlags } from './scripts/extensions.js';
 import { COMMENT_NAME_DEFAULT, CONNECT_API_MAP, executeSlashCommandsOnChatInput, initDefaultSlashCommands, initSlashCommandAutoComplete, isExecutingCommandsFromChatInput, pauseScriptExecution, stopScriptExecution, UNIQUE_APIS } from './scripts/slash-commands.js';
 import { initMacroAutoComplete } from './scripts/autocomplete/MacroAutoComplete.js';
 import {
@@ -1712,6 +1712,8 @@ export async function sendTextareaMessage() {
     if (is_send_press) return;
     if (isExecutingCommandsFromChatInput) return;
 
+    // Extensions may register generation interceptors; make sure deferred activation finished.
+    await getExtensionsActivationPromise();
     hideSwipeButtons(); //Swipe buttons must be hidden now, otherwise concurrent generations are possible.
 
     let generateType = 'normal';
@@ -4230,6 +4232,9 @@ function removeLastMessage() {
  */
 export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0 } = {}, dryRun = false) {
     console.log('Generate entered');
+    // Single choke point for every generation flow (chat input, swipes, group chats, slash commands).
+    // Extensions register generate_interceptor / prompt hooks during activation, so wait for it.
+    await getExtensionsActivationPromise();
     setGenerationProgress(0);
     generation_started = new Date();
 
@@ -7876,6 +7881,7 @@ export async function getSettings(initLoaderHandle = null) {
         accountStorage.init(settings?.accountStorage);
         await setUserControls(data.enable_accounts);
         setRequestCompressionConfig(data.request_compression);
+        setPerfFlags(data.perf);
 
         // Allow subscribers to mutate settings
         await eventSource.emit(event_types.SETTINGS_LOADED_BEFORE, settings);

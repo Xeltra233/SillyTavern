@@ -53,10 +53,12 @@ export let quickReplyApi;
 
 
 const loadSets = async () => {
+    // Only quick reply sets are needed here. The full settings payload includes the settings blob,
+    // presets and themes, which is unnecessary weight on every Quick Reply load.
     const response = await fetch('/api/settings/get', {
         method: 'POST',
         headers: getRequestHeaders(),
-        body: JSON.stringify({}),
+        body: JSON.stringify({ light: true }),
     });
 
     if (response.ok) {

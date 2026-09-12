@@ -2059,7 +2059,10 @@ export async function loadWorldInfo(name) {
 }
 
 export async function updateWorldInfoList() {
-    const result = await fetch('/api/settings/get', {
+    // Only the world names are needed here. Requesting them through /api/settings/get used to
+    // download the entire settings payload (world books, presets, themes) a second time on every
+    // startup - tens of megabytes on a phone. /api/worldinfo/list returns just the list.
+    const result = await fetch('/api/worldinfo/list', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({}),
@@ -2068,7 +2071,8 @@ export async function updateWorldInfoList() {
     if (result.ok) {
         const data = await result.json();
         const editorSelected = String($('#world_editor_select').find(':selected').text());
-        world_names = data.world_names?.length ? data.world_names : [];
+        const list = Array.isArray(data) ? data : [];
+        world_names = list.length ? list.map(entry => entry.file_id).filter(Boolean) : [];
         $('#world_info').find('option[value!=""]').remove();
         $('#world_editor_select').find('option[value!=""]').remove();
 
@@ -4879,12 +4883,21 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
         console.debug(`[WI] Search done. Found ${activatedNow.size} possible entries.`);
 
         // Sort the entries for the probability and the budget limit checks
-        const newEntries = [...activatedNow]
-            .sort((a, b) => {
-                const isASticky = timedEffects.isEffectActive('sticky', a) ? 1 : 0;
-                const isBSticky = timedEffects.isEffectActive('sticky', b) ? 1 : 0;
-                return isBSticky - isASticky || sortedEntries.indexOf(a) - sortedEntries.indexOf(b);
-            });
+        // Ported from upstream staging (#5809): the comparator used sortedEntries.indexOf() twice per
+        // comparison, making the sort O(n^2 log n) on large world books. An index map is built once.
+        let newEntries;
+        if (activatedNow.size > 1) {
+            const sortedEntriesIndex = new Map(sortedEntries.map((entry, index) => [entry, index]));
+            newEntries = [...activatedNow]
+                .sort((a, b) => {
+                    const isASticky = timedEffects.isEffectActive('sticky', a) ? 1 : 0;
+                    const isBSticky = timedEffects.isEffectActive('sticky', b) ? 1 : 0;
+                    return isBSticky - isASticky
+                        || (sortedEntriesIndex.get(a) ?? -1) - (sortedEntriesIndex.get(b) ?? -1);
+                });
+        } else {
+            newEntries = [...activatedNow];
+        }
 
 
         let newContent = '';

@@ -1,5 +1,6 @@
 // native node modules
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import util from 'node:util';
 import net from 'node:net';
@@ -101,6 +102,93 @@ http.globalAgent = new http.Agent({ keepAlive: cliArgs.enableKeepAlive });
 https.globalAgent = new https.Agent({ keepAlive: cliArgs.enableKeepAlive });
 
 const app = express();
+
+/**
+ * Directories under public/ whose contents are stable for a given build, so they can be
+ * served with a long-lived immutable cache once the URL is version-stamped.
+ */
+const VERSIONED_ASSET_DIRS = ['lib', 'webfonts', 'img', 'css', 'sounds'];
+
+/**
+ * Assets that must stay revalidated even when version-stamped: user.css is edited at runtime
+ * and lib.js is served dynamically by the webpack middleware.
+ */
+const NEVER_LONG_CACHED = ['user.css', 'lib.js', 'index.html'];
+
+/**
+ * Builds a short version token for the static frontend assets. It changes whenever a file in
+ * one of the versioned asset directories changes (size or mtime), which is what makes
+ * immutable caching safe across updates.
+ * @returns {string} Short asset version token
+ */
+function computeAssetVersion() {
+    const publicDir = path.join(serverDirectory, 'public');
+    const hash = crypto.createHash('sha1');
+
+    try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(serverDirectory, 'package.json'), 'utf8'));
+        hash.update(String(pkg.version ?? ''));
+    } catch {
+        // package.json is optional for the hash
+    }
+
+    for (const dir of VERSIONED_ASSET_DIRS) {
+        const fullDir = path.join(publicDir, dir);
+        let entries = [];
+        try {
+            entries = fs.readdirSync(fullDir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+            try {
+                const stat = fs.statSync(path.join(fullDir, entry.name));
+                hash.update(`${dir}/${entry.name}:${stat.size}:${Math.round(stat.mtimeMs)}`);
+            } catch {
+                // Ignore unreadable entries
+            }
+        }
+    }
+
+    return hash.digest('hex').slice(0, 12);
+}
+
+const ASSET_VERSION = computeAssetVersion();
+
+/** @type {string|null} */
+let cachedIndexHtml = null;
+
+/**
+ * Returns index.html with a version query appended to local asset URLs, so immutable
+ * caching can be used for the referenced files without risking stale assets after an update.
+ * @returns {string} Version-stamped index.html
+ */
+function getStampedIndexHtml() {
+    if (cachedIndexHtml !== null) {
+        return cachedIndexHtml;
+    }
+
+    const indexPath = path.join(serverDirectory, 'public', 'index.html');
+    let html = fs.readFileSync(indexPath, 'utf8');
+
+    html = html.replace(/(href|src)="([^"]+?)"/g, (match, attribute, url) => {
+        if (/^(?:[a-z]+:)?\/\//i.test(url) || url.startsWith('data:')) {
+            return match;
+        }
+
+        const isVersionedDir = VERSIONED_ASSET_DIRS.some(dir => url.startsWith(`${dir}/`));
+        const isExcluded = NEVER_LONG_CACHED.some(file => url.endsWith(file));
+        if (!isVersionedDir || isExcluded || url.includes('?')) {
+            return match;
+        }
+
+        return `${attribute}="${url}?v=${ASSET_VERSION}"`;
+    });
+
+    cachedIndexHtml = html;
+    return cachedIndexHtml;
+}
+
 app.use(helmet({
     contentSecurityPolicy: false,
 }));
@@ -218,7 +306,9 @@ app.get('/', cacheBuster.middleware, (request, response) => {
         return response.redirect(redirectUrl);
     }
 
-    return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
+    // Version-stamped asset URLs keep immutable caching safe; the HTML itself stays revalidated.
+    response.setHeader('Cache-Control', 'no-cache');
+    return response.type('html').send(getStampedIndexHtml());
 });
 
 // Callback endpoint for OAuth PKCE flows (e.g. OpenRouter)
@@ -239,7 +329,19 @@ app.get('/login', loginPageMiddleware);
 const webpackMiddleware = getWebpackServeMiddleware();
 app.use(webpackMiddleware);
 app.use(userCssMiddleware);
-app.use(express.static(path.join(serverDirectory, 'public'), {}));
+app.use(express.static(path.join(serverDirectory, 'public'), {
+    setHeaders: (response, filePath) => {
+        const request = response.req;
+        const hasVersion = typeof request?.query?.v === 'string' && request.query.v.length > 0;
+        const isNeverLongCached = NEVER_LONG_CACHED.some(file => filePath.endsWith(file));
+
+        if (hasVersion && !isNeverLongCached) {
+            response.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        } else {
+            response.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+        }
+    },
+}));
 
 // Public API
 app.use('/api/users', usersPublicRouter);

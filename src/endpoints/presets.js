@@ -101,3 +101,43 @@ router.post('/restore', function (request, response) {
         return response.sendStatus(500);
     }
 });
+
+/**
+ * Returns the contents of a single preset file.
+ *
+ * The OpenAI preset folder can hold tens of megabytes of presets. Sending all of them with
+ * /api/settings/get blocked slow devices for seconds, so the client fetches a preset's contents
+ * only when it is actually selected/exported. See perf.lazyOpenAIPresets in config.yaml.
+ */
+router.post('/get', function (request, response) {
+    try {
+        const name = sanitize(request.body.name);
+        if (!name) {
+            return response.sendStatus(400);
+        }
+
+        const settings = getPresetSettingsByAPI(request.body.apiId, request.user.directories);
+        if (!settings.folder || !settings.extension) {
+            return response.sendStatus(400);
+        }
+
+        const filename = name + settings.extension;
+        const fullpath = path.resolve(settings.folder, filename);
+        const resolvedFolder = path.resolve(settings.folder);
+
+        // Defense in depth on top of sanitize(): never read outside the preset folder.
+        if (fullpath !== path.join(resolvedFolder, filename)) {
+            return response.sendStatus(400);
+        }
+
+        if (!fs.existsSync(fullpath)) {
+            return response.sendStatus(404);
+        }
+
+        const preset = JSON.parse(fs.readFileSync(fullpath, 'utf8'));
+        return response.send({ name, preset });
+    } catch (error) {
+        console.error('Failed to read preset', error);
+        return response.sendStatus(500);
+    }
+});

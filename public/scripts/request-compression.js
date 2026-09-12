@@ -1,4 +1,16 @@
-import { gzip } from '/lib.js';
+/**
+ * Lazily imports the gzip implementation from the bundled library.
+ *
+ * Request compression is disabled by default, and `/lib.js` is a multi-megabyte bundle.
+ * Importing it statically made every page load download and parse that bundle for nothing,
+ * so it is now resolved on first actual compression request only.
+ * @returns {Promise<function(Uint8Array, function(Error|null, Uint8Array): void): void>} gzip function
+ */
+let gzipModulePromise = null;
+function loadGzip() {
+    gzipModulePromise ??= import('/lib.js').then(module => module.gzip);
+    return gzipModulePromise;
+}
 
 /**
  * @type {RequestCompressionConfig}
@@ -31,21 +43,24 @@ export function setRequestCompressionConfig(config) {
  */
 function gzipBuffer(input) {
     let terminate = () => {};
-    const promise = new Promise((resolve, reject) => {
-        try {
-            terminate = gzip(input, (error, compressed) => {
-                if (error) {
-                    reject(error);
-                    return;
-                }
+    const promise = (async () => {
+        const gzip = await loadGzip();
+        return await new Promise((resolve, reject) => {
+            try {
+                terminate = gzip(input, (error, compressed) => {
+                    if (error) {
+                        reject(error);
+                        return;
+                    }
 
-                resolve(new Uint8Array(compressed));
-            });
-        } catch (error) {
-            reject(error);
-        }
-    });
-    return { promise, terminate };
+                    resolve(new Uint8Array(compressed));
+                });
+            } catch (error) {
+                reject(error);
+            }
+        });
+    })();
+    return { promise, terminate: () => terminate() };
 }
 
 /**

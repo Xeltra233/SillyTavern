@@ -19,6 +19,14 @@ const REQUEST_COMPRESSION_MIN = bytes.parse(getConfigValue('performance.requestC
 const REQUEST_COMPRESSION_MAX = bytes.parse(getConfigValue('performance.requestCompression.maxPayloadSize', '8mb'));
 const REQUEST_COMPRESSION_TIMEOUT = Number(getConfigValue('performance.requestCompression.timeout', 3000, 'number'));
 
+// Frontend performance switches, sent to the client with /api/settings/get.
+// deferredExtensionLoad: activate extensions after the app is interactive instead of blocking startup.
+// lazyOpenAIPresets: send OpenAI preset names only; preset contents are fetched on demand.
+// deferredExtensionLoad defaults to false: extensions that own message rendering would otherwise
+// render messages twice (observed 642 -> 28382 chat DOM nodes) when they activate late.
+const PERF_DEFERRED_EXTENSION_LOAD = !!getConfigValue('perf.deferredExtensionLoad', false, 'boolean');
+const PERF_LAZY_OPENAI_PRESETS = !!getConfigValue('perf.lazyOpenAIPresets', true, 'boolean');
+
 // 10 minutes
 const AUTOSAVE_INTERVAL = 10 * 60 * 1000;
 
@@ -217,6 +225,14 @@ router.post('/save', function (request, response) {
 
 // Wintermute's code
 router.post('/get', (request, response) => {
+    // Light mode: callers that only need a small slice of the settings (e.g. the Quick Reply
+    // extension needs quickReplyPresets) avoid downloading and parsing the whole payload, which
+    // on slow devices costs several megabytes and seconds of main-thread JSON parsing.
+    if (request.body?.light === true) {
+        const { fileContents: quickReplyPresets } = readAndParseFromDirectory(request.user.directories.quickreplies);
+        return response.send({ light: true, quickReplyPresets });
+    }
+
     let settings;
     try {
         const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
@@ -233,10 +249,18 @@ router.post('/get', (request, response) => {
         });
 
     // OpenAI Settings
-    const { fileContents: openai_settings, fileNames: openai_setting_names }
+    const { fileContents: openai_settings_full, fileNames: openai_setting_names }
         = readPresetsFromDirectory(request.user.directories.openAI_Settings, {
             sortFunction: sortByName(request.user.directories.openAI_Settings), removeFileExtension: true,
         });
+
+    // The OpenAI preset folder can be tens of megabytes. Unless the client explicitly asks for the
+    // contents, only the names are sent and the client fetches a preset when it is used.
+    // See perf.lazyOpenAIPresets in config.yaml.
+    const includePresetContents = request.body?.include_preset_contents === true;
+    const openai_settings = PERF_LAZY_OPENAI_PRESETS && !includePresetContents
+        ? new Array(openai_setting_names.length).fill(undefined)
+        : openai_settings_full;
 
     // TextGenerationWebUI Settings
     const { fileContents: textgenerationwebui_presets, fileNames: textgenerationwebui_preset_names }
@@ -291,6 +315,10 @@ router.post('/get', (request, response) => {
             minPayloadSize: REQUEST_COMPRESSION_MIN || 0,
             maxPayloadSize: REQUEST_COMPRESSION_MAX || 0,
             timeout: REQUEST_COMPRESSION_TIMEOUT || 0,
+        },
+        perf: {
+            deferredExtensionLoad: PERF_DEFERRED_EXTENSION_LOAD,
+            lazyOpenAIPresets: PERF_LAZY_OPENAI_PRESETS,
         },
     });
 });
