@@ -171,10 +171,22 @@ export function guesstimate(str) {
 async function loadTokenCache() {
     try {
         console.debug('Chat Completions: loading token cache');
-        tokenCache = await objectStore.getItem('tokenCache') || {};
+        const stored = await objectStore.getItem('tokenCache');
+        if (!stored || typeof stored !== 'object') {
+            return;
+        }
+        // Merge instead of replacing: counts computed while the cache was still loading must win.
+        for (const [chatId, entries] of Object.entries(stored)) {
+            if (!entries || typeof entries !== 'object') {
+                continue;
+            }
+            const existing = tokenCache[chatId];
+            tokenCache[chatId] = existing && typeof existing === 'object'
+                ? Object.assign(entries, existing)
+                : entries;
+        }
     } catch (e) {
         console.log('Chat Completions: unable to load token cache, using default value', e);
-        tokenCache = {};
     }
 }
 
@@ -1225,7 +1237,11 @@ export async function initTokenizers() {
             sessionStorage.removeItem(TOKENIZER_WARNING_KEY);
         }
     });
-    await loadTokenCache();
+    // The token cache lives in one large IndexedDB record; deserializing it used to block the
+    // startup sequence (LoAF: 1.4-1.9 s of main-thread time at 4x CPU throttle, worse on a cold
+    // cache). Token counts are only needed once something actually counts tokens, so load it
+    // right after the app becomes interactive.
+    eventSource.on(event_types.APP_READY, () => setTimeout(() => void loadTokenCache(), 0));
     registerDebugFunction('resetTokenCache', 'Reset token cache', 'Purges the calculated token counts. Use this if you want to force a full re-tokenization of all chats or suspect the token counts are wrong.', resetTokenCache);
 }
 
